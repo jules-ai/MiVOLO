@@ -40,3 +40,14 @@
 *   **推理模式**：**在 CPU 上基于单个样本执行（串行）。** 位于 `prepare_classification_images`，对 Numpy 数组直接除以 255 缩放到 0~1：`img = img / 255.0`，接着减去均值并除以方差 `img = (img - mean) / std`（使用 ImageNet 的标准系数）。然后再拷贝为张量并推送到 GPU `cuda` 端。
 *   **训练/评估模式**：**在 GPU 上对 Batch 批量执行。** 在 `PrefetchLoaderForMultiInput.__iter__` 阶段，通过 CUDA 流异步地将 `uint8` 的 Batch 张量直接送入 GPU；接着将其转为 `float32`，然后**直接使用已经预乘了 255 的 mean 和 std 张量执行就地运算**：`next_input.to(self.img_dtype).sub_(self.mean).div_(self.std)`。
 *   **结论**：**归一化计算平台（CPU vs GPU）和数学形式（先除 255 再标准化 vs 张量直接减 (mean*255) 除 (std*255)）不同。但经过脚本数值测试表明，这两种实现在浮点数精度截断上仅有 2e-7 级别的极小差异，在工程上等效。**
+
+
+### 8. 网络输出解析与后处理 (Post-processing)
+模型的输出包含性别与年龄两部分的预测值。针对输出的解码和反归一化环节：
+*   **推理模式**：在 `MiVOLO.fill_in_results` 中执行。
+    *   **年龄 (Age)**：对模型输出的年龄张量执行反归一化：`age = age_output * (max_age - min_age) + avg_age`，并最后使用 `round(age, 2)` 保留两位小数。
+    *   **性别 (Gender)**：对模型输出的性别前两维执行 `softmax(-1)` 操作获取概率，随后通过 `topk(1)` 取最大概率对应的值（0 代表 `male`，1 代表 `female`）。
+*   **训练/评估模式**：在 `eval_pretrained.py` 中的 `postprocess_age` 和 `postprocess_gender` 函数中执行。
+    *   **年龄 (Age)**：采用**完全一致的公式**还原预测的年龄 `age_out = age_out * (max_age - min_age) + avg_age`。但增加了越界处理 `torch.clamp(age_out, min=0)` 防止年龄为负，并且如果是离散分类任务，还会向下取整 `torch.round(age_out)` 并通过分箱区间（intervals）计算具体的类别索引。此外，为了计算真实误差，该模式下还需要同时对基准真实目标 (`age_target`) 执行相同的反归一化操作。
+    *   **性别 (Gender)**：在 `process_batch` 中提取前两维的通道，通过调用评估工具（如 `accuracy(gender_out, gender_target, topk=(1,))`）利用 softmax 后的结果比对计算准确率，内部逻辑依然等效于选取概率最高的通道。
+*   **结论**：**对于模型推断的特征解码，无论年龄的反归一化还原还是性别的 Softmax 取最大概率，核心数学计算在两种模式下是完全一致的。不同点仅在于评估模式为方便计算验证集误差，增加了负值截断（Clamp）、针对分类任务的离散化和对 Ground Truth 的同步转换操作。**

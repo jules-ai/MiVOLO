@@ -50,7 +50,17 @@
     * 逻辑是采用线性还原公式：`age = age_output * (max_age - min_age) + avg_age`。
     * **推理模式与评估模式在公式执行上完全一致。** 关于公式内的具体系数：
         * `min_age`、`max_age` 并非代码里的硬编码常量，而是**动态生成或读取的**。
-        * **在推理时**，它们被保存在预训练模型的检查点（checkpoint 的 `state_dict`）中并随权重一起加载。不同的预训练模型具有不同的值。例如作者使用 UTK 或 IMDB 训练出的检查点，其 `min_age` 一般接近于 `1.0`，`max_age` 接近于 `100.0`，而 `avg_age` 则是两者的中值（如 `50.5`）。
+        * **在推理时**，它们被保存在预训练模型的检查点（checkpoint 的 `state_dict` 或配置）中并随权重一起加载。不同的预训练模型具有不同的值。例如，在官方发布的最新 `mivolo_v2` 模型配置文件中，这三个数值确切地为：**`min_age: 0`，`max_age: 122`，`avg_age: 61.0`**。
+        * **如何读取**：你可以通过极简的 Python 代码从官方 `.pth.tar` 权重文件中读取出它们：
+          ```python
+          import torch
+          # 假设你下载了官方权重文件
+          ckpt_path = "models/model_imdb_cross_person.pth.tar"
+          state = torch.load(ckpt_path, map_location="cpu")
+          print("min_age:", state.get("min_age"))
+          print("max_age:", state.get("max_age"))
+          print("avg_age:", state.get("avg_age"))
+          ```
         * **在全新训练时**，`AgeGenderDataset` 会通过遍历整个训练标注集，统计所有图片标注的真实年龄分布，自动计算出全集最小年龄作为 `min_age`，最大年龄作为 `max_age`，并算出 `avg_age = (max_age + min_age) / 2.0`。
 *   **性别判定**：对模型前两个通道分别执行 `softmax(-1)` 换算为概率分布。
     * **推理模式与评估模式处理一致。** 通过 `topk(1)` （或 `accuracy` 的 `topk=1` 函数）选取最大的那个概率索引。如果索引为 0 判定为 `male`，1 则为 `female`。
